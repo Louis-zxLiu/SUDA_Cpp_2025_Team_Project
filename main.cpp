@@ -15,6 +15,8 @@ int left = 100, top = 20, right = left + 250, bottom = top + 400; // 下落区�
 char c1 = 'A', c2;                                              // 下落字母/用户输入字母
 int x = -1, y = -1;                                             // 字母坐标（-1为未开始）
 int iScoring = 0, iFail = 0;                                    // 得分/失败次数
+int iCombo = 0;                                                   // 连击次数
+int iHighScore = 0;                                               // 最高分
 int gameover = 0;                                               // 游戏结束标志
 int paused = 0;                                                 // 暂停标志
 COLORREF charColor = RGB(0, 0, 0);                              // 当前字母颜色
@@ -26,6 +28,8 @@ void DrawBk(HDC hdc, int left, int top, int right, int bottom); // 绘制背景
 void ShowScoring(HDC hdc, int x, int y, int score, int fail);   // 显示分数
 void GameOver(HDC hdc, int x, int y);                           // 显示游戏结束
 void Fire(HDC hdc, int x, int top, int bottom);                 // 绘制射击效果
+void LoadHighScore();                                           // 读取最高分
+void SaveHighScore();                                           // 保存最高分
 
 // 主函数（Win32程序入口）
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
@@ -33,6 +37,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     WNDCLASSEXW wcex;
     HWND hWnd;
     MSG msg;
+
+    // 读取最高分
+    LoadHighScore();
 
     // 初始化随机数生成器
     srand((unsigned int)time(NULL));
@@ -120,6 +127,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 gameover = 0;
                 iScoring = 0;
                 iFail = 0;
+                iCombo = 0;
                 // 生成第一个字母
                 c1 = rand() % 26 + 'A';
                 charColor = RGB(rand() % 200, rand() % 200, rand() % 200); // 随机颜色(避免太浅)
@@ -156,6 +164,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (y > bottom)
             {
                 iFail++; // 失败次数+1
+                iCombo = 0; // 连击中断
                 // 播放失败音效
                 Beep(200, 100);
 
@@ -241,18 +250,32 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 // 播放击中音效
                 Beep(1000, 50); 
                 
+                // 增加连击
+                iCombo++;
+                
+                // 得分计算：基础分1 + 连击奖励
+                iScoring += 1 + iCombo / 5;
+                
+                // 连击奖励：每10连击减少1次失败
+                if (iCombo > 0 && iCombo % 10 == 0 && iFail > 0)
+                {
+                    iFail--;
+                    Beep(1500, 100); // 奖励音效
+                }
+
                 // 生成新字母
                 c1 = rand() % 26 + 'A';
                 charColor = RGB(rand() % 200, rand() % 200, rand() % 200);
                 x = left + 5 + (c1 - 'A') * 9;
                 y = top;
-                // 得分+1
-                iScoring++;
             }
             else
             {
                 // 播放未击中音效
                 Beep(300, 100);
+                
+                // 连击中断
+                iCombo = 0;
 
                 // 未击中，失败次数+1
                 iFail++;
@@ -308,20 +331,41 @@ void DrawBk(HDC hdc, int left, int top, int right, int bottom)
 void ShowScoring(HDC hdc, int x, int y, int score, int fail)
 {
     wchar_t szScore[64];
+    
+    // 绘制最高分
+    SetTextColor(hdc, RGB(0, 0, 128)); // 深蓝色
+    swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"最高记录：%d", iHighScore);
+    TextOutW(hdc, x, y - 30, szScore, wcslen(szScore));
+
     // 绘制得分
-    swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"得分：%d", score);
+    SetTextColor(hdc, RGB(0, 0, 0));
+    swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"当前得分：%d", score);
     TextOutW(hdc, x, y, szScore, wcslen(szScore));
+    
     // 绘制失败次数
-    swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"失败次数：%d/%d", fail, MAX_FAIL);
+    swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"生命值：%d", MAX_FAIL - fail);
     TextOutW(hdc, x, y + 30, szScore, wcslen(szScore));
     
     // 绘制等级
-    int level = score / 10 + 1;
+    int level = score / 50 + 1; // 调整等级计算公式
     swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"当前等级：%d", level);
     TextOutW(hdc, x, y + 60, szScore, wcslen(szScore));
+
+    // 绘制连击 (高亮显示)
+    if (iCombo > 1)
+    {
+        SetTextColor(hdc, RGB(255, 0, 0)); // 红色高亮
+        HFONT hFont = CreateFontW(20, 0, 0, 0, FW_BOLD, FALSE, TRUE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Arial");
+        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+        swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"COMBO x%d !", iCombo);
+        TextOutW(hdc, x, y + 90, szScore, wcslen(szScore));
+        SelectObject(hdc, hOldFont);
+        DeleteObject(hFont);
+        SetTextColor(hdc, RGB(0, 0, 0)); // 恢复黑色
+    }
     
     // 提示
-    TextOutW(hdc, x, y + 120, L"按 ESC 暂停", 9);
+    TextOutW(hdc, x, y + 130, L"按 ESC 暂停", 9);
 }
 
 // 显示游戏结束画面
@@ -346,6 +390,20 @@ void GameOver(HDC hdc, int x, int y)
     SetTextColor(hdc, RGB(0, 0, 0));
     swprintf_s(szGameOver, sizeof(szGameOver)/sizeof(wchar_t), L"最终得分：%d", iScoring);
     TextOutW(hdc, x - 20, y + 50, szGameOver, wcslen(szGameOver));
+    
+    // 更新最高分
+    if (iScoring > iHighScore)
+    {
+        iHighScore = iScoring;
+        SaveHighScore();
+        SetTextColor(hdc, RGB(0, 128, 0)); // 绿色
+        TextOutW(hdc, x - 10, y + 90, L"新纪录！", 4);
+    }
+    else
+    {
+        swprintf_s(szGameOver, sizeof(szGameOver)/sizeof(wchar_t), L"最高记录：%d", iHighScore);
+        TextOutW(hdc, x - 20, y + 90, szGameOver, wcslen(szGameOver));
+    }
 
     // 恢复字体
     SelectObject(hdc, hOldFont);
@@ -366,4 +424,30 @@ void Fire(HDC hdc, int x, int top, int bottom)
     // 恢复画笔
     SelectObject(hdc, hOldPen);
     DeleteObject(hPen);
+}
+
+// 读取最高分
+void LoadHighScore()
+{
+    FILE* fp = NULL;
+    if (fopen_s(&fp, "highscore.dat", "rb") == 0 && fp != NULL)
+    {
+        fread(&iHighScore, sizeof(int), 1, fp);
+        fclose(fp);
+    }
+    else
+    {
+        iHighScore = 0;
+    }
+}
+
+// 保存最高分
+void SaveHighScore()
+{
+    FILE* fp = NULL;
+    if (fopen_s(&fp, "highscore.dat", "wb") == 0 && fp != NULL)
+    {
+        fwrite(&iHighScore, sizeof(int), 1, fp);
+        fclose(fp);
+    }
 }
