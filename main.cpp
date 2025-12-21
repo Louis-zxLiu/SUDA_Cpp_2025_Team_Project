@@ -1,35 +1,56 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <time.h>
 #include <wchar.h>
+#include <vector>
+#include <cmath>
+#include <algorithm>
 
 // 菜单ID定义
 #define ID_START    101    // 开始游戏
 #define IDM_ABOUT   102    // 关于
 #define IDM_EXIT    103    // 退出
 
+// 数据结构定义
+struct Letter {
+    float x, y;
+    char c;
+    COLORREF color;
+    float speed;
+};
+
+struct Particle {
+    float x, y;
+    float vx, vy;
+    int life; // 生命期（帧数）
+    COLORREF color;
+};
+
 // 游戏全局变量
 int left = 100, top = 20, right = left + 250, bottom = top + 400; // 下落区域
-char c1 = 'A', c2;                                              // 下落字母/用户输入字母
-int x = -1, y = -1;                                             // 字母坐标（-1为未开始）
-int iScoring = 0, iFail = 0;                                    // 得分/失败次数
-int iCombo = 0;                                                   // 连击次数
+std::vector<Letter> g_letters;                                    // 活跃字母列表
+std::vector<Particle> g_particles;                                // 活跃粒子列表
+int iScoring = 0, iFail = 0;                                      // 得分/失败次数
 int iHighScore = 0;                                               // 最高分
-int gameover = 0;                                               // 游戏结束标志
-int paused = 0;                                                 // 暂停标志
-COLORREF charColor = RGB(0, 0, 0);                              // 当前字母颜色
-const int MAX_FAIL = 10;                                        // 最大失败次数（超过则游戏结束）
+int iCombo = 0;                                                   // 连击数
+int gameover = 0;                                                 // 游戏结束标志
+int paused = 0;                                                   // 暂停标志
+const int MAX_FAIL = 10;                                          // 最大失败次数
+int g_bombs = 3;                                                  // 炸弹数量
+int g_spawnTimer = 0;                                             // 生成计时器
 
 // 函数声明
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
-void DrawBk(HDC hdc, int left, int top, int right, int bottom); // 绘制背景
-void ShowScoring(HDC hdc, int x, int y, int score, int fail);   // 显示分数
-void GameOver(HDC hdc, int x, int y);                           // 显示游戏结束
-void Fire(HDC hdc, int x, int top, int bottom);                 // 绘制射击效果
-void LoadHighScore();                                           // 读取最高分
-void SaveHighScore();                                           // 保存最高分
+void DrawBk(HDC hdc, int left, int top, int right, int bottom);
+void ShowScoring(HDC hdc, int x, int y, int score, int fail);
+void GameOver(HDC hdc, int x, int y);
+void Fire(HDC hdc, int startX, int startY, int endX, int endY);
+void SpawnLetter();
+void SpawnParticles(float x, float y, COLORREF color);
+void UseBomb(HWND hWnd);
+void LoadHighScore();
+void SaveHighScore();
 
 // 主函数（Win32程序入口）
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
@@ -38,11 +59,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     HWND hWnd;
     MSG msg;
 
-    // 读取最高分
-    LoadHighScore();
-
     // 初始化随机数生成器
     srand((unsigned int)time(NULL));
+
+    // 加载最高分
+    LoadHighScore();
 
     // 注册窗口类
     wcex.cbSize = sizeof(WNDCLASSEXW);
@@ -93,7 +114,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     return (int)msg.wParam;
 }
 
-// 窗口过程函数（处理所有消息）
+// 窗口过程函数
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     HMENU hMenu;
@@ -119,7 +140,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_COMMAND:
         {
             int wmId = LOWORD(wParam);
-            // 分析菜单选择
             switch (wmId)
             {
             case ID_START:
@@ -128,19 +148,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 iScoring = 0;
                 iFail = 0;
                 iCombo = 0;
-                // 生成第一个字母
-                c1 = rand() % 26 + 'A';
-                charColor = RGB(rand() % 200, rand() % 200, rand() % 200); // 随机颜色(避免太浅)
-                x = left + 5 + (c1 - 'A') * 9;
-                y = top;
-                // 启动下落定时器（100ms一次，控制下落速度）
-                SetTimer(hWnd, 1, 100, NULL);
-                // 刷新窗口
+                g_bombs = 3;
+                g_letters.clear();
+                g_particles.clear();
+                g_spawnTimer = 0;
+                
+                // 立即生成第一个字母
+                SpawnLetter();
+
+                // 启动定时器（30ms一次，约33FPS，更流畅）
+                SetTimer(hWnd, 1, 30, NULL);
                 InvalidateRect(hWnd, NULL, TRUE);
                 break;
 
             case IDM_ABOUT:
-                MessageBoxW(hWnd, L"字母下落射击游戏\n按对应字母键击中下落字母得分，失败10次游戏结束！", L"关于", MB_OK);
+                MessageBoxW(hWnd, L"字母射击游戏\n\n特性：\n1. 多字母同时下落\n2. 粒子爆炸特效\n3. 空格键释放全屏炸弹\n4. 连击系统与得分加成\n5. 最高分记录", L"关于", MB_OK);
                 break;
 
             case IDM_EXIT:
@@ -154,66 +176,108 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_TIMER:
-        // 处理定时器消息（字母下落）
         if (wParam == 1 && !gameover && !paused)
         {
-            // 速度随分数增加而增加
-            int speed = 5 + iScoring / 5;
-            y += speed; 
-            // 判断字母是否落地
-            if (y > bottom)
+            // 1. 字母生成逻辑
+            // 随着分数增加，生成频率加快
+            int spawnRate = 60 - (iScoring / 10); // 初始每60帧(约1.8秒)生成一个
+            if (spawnRate < 20) spawnRate = 20;   // 最快每0.6秒一个
+            
+            g_spawnTimer++;
+            if (g_spawnTimer >= spawnRate)
             {
-                iFail++; // 失败次数+1
-                iCombo = 0; // 连击中断
-                // 播放失败音效
-                Beep(200, 100);
+                SpawnLetter();
+                g_spawnTimer = 0;
+            }
 
-                // 判断是否达到最大失败次数
-                if (iFail >= MAX_FAIL)
+            // 2. 更新字母位置
+            for (size_t i = 0; i < g_letters.size(); )
+            {
+                g_letters[i].y += g_letters[i].speed;
+
+                // 判断是否落地
+                if (g_letters[i].y > bottom)
                 {
-                    gameover = 1;
-                    KillTimer(hWnd, 1); // 停止下落定时器
+                    iFail++;
+                    iCombo = 0; // 落地重置连击
+                    Beep(200, 100);
+                    g_letters.erase(g_letters.begin() + i);
+
+                    if (iFail >= MAX_FAIL)
+                    {
+                        gameover = 1;
+                        if (iScoring > iHighScore) {
+                            iHighScore = iScoring;
+                            SaveHighScore();
+                        }
+                        KillTimer(hWnd, 1);
+                    }
                 }
                 else
                 {
-                    // 生成新字母
-                    c1 = rand() % 26 + 'A';
-                    charColor = RGB(rand() % 200, rand() % 200, rand() % 200);
-                    x = left + 5 + (c1 - 'A') * 9;
-                    y = top;
+                    i++;
                 }
-                // 刷新窗口
-                InvalidateRect(hWnd, NULL, TRUE);
             }
+
+            // 3. 更新粒子位置
+            for (size_t i = 0; i < g_particles.size(); )
+            {
+                g_particles[i].x += g_particles[i].vx;
+                g_particles[i].y += g_particles[i].vy;
+                g_particles[i].vy += 0.5f; // 重力效果
+                g_particles[i].life--;
+
+                if (g_particles[i].life <= 0)
+                {
+                    g_particles.erase(g_particles.begin() + i);
+                }
+                else
+                {
+                    i++;
+                }
+            }
+
+            InvalidateRect(hWnd, NULL, TRUE);
         }
         break;
 
     case WM_PAINT:
         hdc = BeginPaint(hWnd, &ps);
-        // 绘制背景
+        
+        // 双缓冲绘图防止闪烁 (可选优化，这里直接绘图)
         DrawBk(hdc, left, top, right, bottom);
-        // 显示分数和失败次数
         ShowScoring(hdc, right + 20, top + 50, iScoring, iFail);
-        // 判断游戏是否结束
+
         if (gameover)
         {
             GameOver(hdc, left + 30, top + 130);
         }
-        else if (x != -1 && y != -1)
+        else
         {
-            // 显示当前下落字母
-            wchar_t szTemp[8];
-            swprintf_s(szTemp, sizeof(szTemp)/sizeof(wchar_t), L"%c", c1);
-            SetTextColor(hdc, charColor); // 设置随机颜色
-            // 字体加粗一点
+            // 绘制所有字母
             HFONT hFont = CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Arial");
             HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
-            TextOutW(hdc, x, y, szTemp, wcslen(szTemp));
+            SetBkMode(hdc, TRANSPARENT);
+
+            for (const auto& l : g_letters)
+            {
+                wchar_t szTemp[2] = { (wchar_t)l.c, 0 };
+                SetTextColor(hdc, l.color);
+                TextOutW(hdc, (int)l.x, (int)l.y, szTemp, 1);
+            }
             SelectObject(hdc, hOldFont);
             DeleteObject(hFont);
+
+            // 绘制所有粒子
+            for (const auto& p : g_particles)
+            {
+                SetPixel(hdc, (int)p.x, (int)p.y, p.color);
+                SetPixel(hdc, (int)p.x + 1, (int)p.y, p.color); // 稍微大一点的点
+                SetPixel(hdc, (int)p.x, (int)p.y + 1, p.color);
+                SetPixel(hdc, (int)p.x + 1, (int)p.y + 1, p.color);
+            }
         }
         
-        // 显示暂停状态
         if (paused)
         {
              SetTextColor(hdc, RGB(255, 0, 0));
@@ -224,10 +288,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_CHAR:
-        // 处理暂停快捷键 (ESC键的ASCII码为27)
         if (wParam == VK_ESCAPE)
         {
-            if (!gameover && x != -1) // 游戏进行中才允许暂停
+            if (!gameover)
             {
                 paused = !paused;
                 InvalidateRect(hWnd, NULL, TRUE);
@@ -235,66 +298,75 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             break;
         }
 
-        // 处理键盘输入（不区分大小写）
         if (!gameover && !paused)
         {
-            c2 = (wParam >= 'a' && wParam <= 'z') ? (wParam - 'a' + 'A') : wParam;
-            hdc = GetDC(hWnd);
-
-            // 绘制射击效果
-            Fire(hdc, left + 5 + (c2 - 'A') * 9 + 4, top, bottom);
-
-            // 判断是否击中
-            if (c2 == c1)
+            // 炸弹功能 (空格键)
+            if (wParam == VK_SPACE)
             {
-                // 播放击中音效
-                Beep(1000, 50); 
-                
-                // 增加连击
-                iCombo++;
-                
-                // 得分计算：基础分1 + 连击奖励
-                iScoring += 1 + iCombo / 5;
-                
-                // 连击奖励：每10连击减少1次失败
-                if (iCombo > 0 && iCombo % 10 == 0 && iFail > 0)
-                {
-                    iFail--;
-                    Beep(1500, 100); // 奖励音效
-                }
+                UseBomb(hWnd);
+                break;
+            }
 
-                // 生成新字母
-                c1 = rand() % 26 + 'A';
-                charColor = RGB(rand() % 200, rand() % 200, rand() % 200);
-                x = left + 5 + (c1 - 'A') * 9;
-                y = top;
+            char inputChar = (wchar_t)wParam;
+            if (inputChar >= 'a' && inputChar <= 'z') inputChar -= 32; // 转大写
+
+            // 寻找匹配的最低的字母
+            int targetIndex = -1;
+            float maxY = -1000.0f;
+
+            for (size_t i = 0; i < g_letters.size(); i++)
+            {
+                if (g_letters[i].c == inputChar)
+                {
+                    if (g_letters[i].y > maxY)
+                    {
+                        maxY = g_letters[i].y;
+                        targetIndex = i;
+                    }
+                }
+            }
+
+            hdc = GetDC(hWnd);
+            if (targetIndex != -1)
+            {
+                // 击中
+                Letter& target = g_letters[targetIndex];
+                
+                // 射击特效
+                Fire(hdc, left + 5 + (inputChar - 'A') * 9 + 4, bottom, (int)target.x + 4, (int)target.y + 12);
+                
+                // 粒子特效
+                SpawnParticles(target.x + 4, target.y + 12, target.color);
+                
+                Beep(1000, 30);
+                iCombo++;
+                iScoring += (1 + iCombo / 5); // 连击得分加成
+
+                // 移除字母
+                g_letters.erase(g_letters.begin() + targetIndex);
             }
             else
             {
-                // 播放未击中音效
-                Beep(300, 100);
-                
-                // 连击中断
-                iCombo = 0;
-
-                // 未击中，失败次数+1
+                // 未击中
+                Beep(300, 50);
                 iFail++;
-                // 判断是否游戏结束
+                iCombo = 0; // 按错重置连击
                 if (iFail >= MAX_FAIL)
                 {
                     gameover = 1;
+                    if (iScoring > iHighScore) {
+                        iHighScore = iScoring;
+                        SaveHighScore();
+                    }
                     KillTimer(hWnd, 1);
                 }
             }
-
             ReleaseDC(hWnd, hdc);
-            // 刷新窗口
             InvalidateRect(hWnd, NULL, TRUE);
         }
         break;
 
     case WM_DESTROY:
-        // 清理定时器
         KillTimer(hWnd, 1);
         PostQuitMessage(0);
         break;
@@ -305,17 +377,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-// 绘制游戏背景（带边框的矩形区域）
 void DrawBk(HDC hdc, int left, int top, int right, int bottom)
 {
-    // 填充背景色（浅灰色）
+    // 填充背景色
     HBRUSH hBrush = CreateSolidBrush(RGB(240, 240, 240));
     HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
     Rectangle(hdc, left, top, right, bottom);
     SelectObject(hdc, hOldBrush);
     DeleteObject(hBrush);
 
-    // 绘制边框（黑色）
+    // 绘制边框
     HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
     HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
     Rectangle(hdc, left, top, right, bottom);
@@ -327,125 +398,147 @@ void DrawBk(HDC hdc, int left, int top, int right, int bottom)
     TextOutW(hdc, left + 5, bottom - 20, L"ABCDEFGHIJKLMNOPQRSTUVWXYZ", 26);
 }
 
-// 显示得分和失败次数
 void ShowScoring(HDC hdc, int x, int y, int score, int fail)
 {
-    wchar_t szScore[64];
-    
-    // 绘制最高分
+    wchar_t szText[64];
+
     SetTextColor(hdc, RGB(0, 0, 128)); // 深蓝色
-    swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"最高记录：%d", iHighScore);
-    TextOutW(hdc, x, y - 30, szScore, wcslen(szScore));
+    swprintf_s(szText, 64, L"最高记录：%d", iHighScore);
+    TextOutW(hdc, x, y - 30, szText, wcslen(szText));
 
-    // 绘制得分
     SetTextColor(hdc, RGB(0, 0, 0));
-    swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"当前得分：%d", score);
-    TextOutW(hdc, x, y, szScore, wcslen(szScore));
+    swprintf_s(szText, 64, L"当前得分：%d", score);
+    TextOutW(hdc, x, y, szText, wcslen(szText));
     
-    // 绘制失败次数
-    swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"生命值：%d", MAX_FAIL - fail);
-    TextOutW(hdc, x, y + 30, szScore, wcslen(szScore));
+    swprintf_s(szText, 64, L"生命值：%d", MAX_FAIL - fail);
+    TextOutW(hdc, x, y + 30, szText, wcslen(szText));
     
-    // 绘制等级
-    int level = score / 50 + 1; // 调整等级计算公式
-    swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"当前等级：%d", level);
-    TextOutW(hdc, x, y + 60, szScore, wcslen(szScore));
+    // 炸弹数量
+    SetTextColor(hdc, RGB(200, 0, 0));
+    swprintf_s(szText, 64, L"全屏炸弹(Space)：%d", g_bombs);
+    TextOutW(hdc, x, y + 60, szText, wcslen(szText));
 
-    // 绘制连击 (高亮显示)
-    if (iCombo > 1)
-    {
-        SetTextColor(hdc, RGB(255, 0, 0)); // 红色高亮
-        HFONT hFont = CreateFontW(20, 0, 0, 0, FW_BOLD, FALSE, TRUE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Arial");
-        HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
-        swprintf_s(szScore, sizeof(szScore)/sizeof(wchar_t), L"COMBO x%d !", iCombo);
-        TextOutW(hdc, x, y + 90, szScore, wcslen(szScore));
-        SelectObject(hdc, hOldFont);
-        DeleteObject(hFont);
-        SetTextColor(hdc, RGB(0, 0, 0)); // 恢复黑色
+    if (iCombo >= 2) {
+        SetTextColor(hdc, RGB(255, 0, 0));
+        swprintf_s(szText, 64, L"Combo x%d", iCombo);
+        TextOutW(hdc, x, y + 100, szText, wcslen(szText));
     }
-    
-    // 提示
-    TextOutW(hdc, x, y + 130, L"按 ESC 暂停", 9);
+
+    SetTextColor(hdc, RGB(0, 0, 0));
+    TextOutW(hdc, x, y + 140, L"按 ESC 暂停", 9);
 }
 
-// 显示游戏结束画面
 void GameOver(HDC hdc, int x, int y)
 {
-    wchar_t szGameOver[64];
-    // 设置字体（加大加粗）
-    HFONT hFont = CreateFontW(
-        36, 0, 0, 0, FW_BOLD,
-        FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-        L"黑体");
+    wchar_t szText[64];
+    HFONT hFont = CreateFontW(36, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"黑体");
     HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
 
-    // 绘制游戏结束文字
     SetTextColor(hdc, RGB(255, 0, 0));
-    swprintf_s(szGameOver, sizeof(szGameOver)/sizeof(wchar_t), L"Game Over!");
-    TextOutW(hdc, x, y, szGameOver, wcslen(szGameOver));
+    TextOutW(hdc, x, y, L"Game Over!", 10);
 
-    // 绘制最终得分
     SetTextColor(hdc, RGB(0, 0, 0));
-    swprintf_s(szGameOver, sizeof(szGameOver)/sizeof(wchar_t), L"最终得分：%d", iScoring);
-    TextOutW(hdc, x - 20, y + 50, szGameOver, wcslen(szGameOver));
-    
-    // 更新最高分
-    if (iScoring > iHighScore)
+    swprintf_s(szText, 64, L"最终得分：%d", iScoring);
+    TextOutW(hdc, x - 20, y + 50, szText, wcslen(szText));
+
+    if (iScoring >= iHighScore && iScoring > 0)
     {
-        iHighScore = iScoring;
-        SaveHighScore();
-        SetTextColor(hdc, RGB(0, 128, 0)); // 绿色
-        TextOutW(hdc, x - 10, y + 90, L"新纪录！", 4);
-    }
-    else
-    {
-        swprintf_s(szGameOver, sizeof(szGameOver)/sizeof(wchar_t), L"最高记录：%d", iHighScore);
-        TextOutW(hdc, x - 20, y + 90, szGameOver, wcslen(szGameOver));
+        SetTextColor(hdc, RGB(0, 150, 0));
+        TextOutW(hdc, x - 20, y + 100, L"新纪录！", 4);
     }
 
-    // 恢复字体
     SelectObject(hdc, hOldFont);
     DeleteObject(hFont);
 }
 
-// 绘制射击效果（竖线模拟子弹）
-void Fire(HDC hdc, int x, int top, int bottom)
+void Fire(HDC hdc, int startX, int startY, int endX, int endY)
 {
-    // 设置红色画笔
-    HPEN hPen = CreatePen(PS_SOLID, 1, RGB(255, 0, 0));
+    HPEN hPen = CreatePen(PS_SOLID, 2, RGB(255, 100, 0)); // 橙色激光
     HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
 
-    // 绘制竖线（子弹轨迹）
-    MoveToEx(hdc, x, top, NULL);
-    LineTo(hdc, x, bottom);
+    MoveToEx(hdc, startX, startY, NULL);
+    LineTo(hdc, endX, endY);
 
-    // 恢复画笔
     SelectObject(hdc, hOldPen);
     DeleteObject(hPen);
 }
 
-// 读取最高分
+void SpawnLetter()
+{
+    Letter l;
+    l.c = rand() % 26 + 'A';
+    l.x = (float)(left + 5 + (l.c - 'A') * 9);
+    l.y = (float)top;
+    l.color = RGB(rand() % 200, rand() % 200, rand() % 200);
+    // 基础速度 + 难度加成 (max 5.0)
+    l.speed = 1.0f + (rand() % 10) / 10.0f + (iScoring / 50.0f);
+    if (l.speed > 5.0f) l.speed = 5.0f;
+    
+    g_letters.push_back(l);
+}
+
+void SpawnParticles(float x, float y, COLORREF color)
+{
+    for (int i = 0; i < 10; i++)
+    {
+        Particle p;
+        p.x = x;
+        p.y = y;
+        float angle = (float)(rand() % 360) * 3.14159f / 180.0f;
+        float speed = (float)(rand() % 5 + 2);
+        p.vx = cos(angle) * speed;
+        p.vy = sin(angle) * speed;
+        p.life = 20; // 持续20帧
+        p.color = color;
+        g_particles.push_back(p);
+    }
+}
+
+void UseBomb(HWND hWnd)
+{
+    if (g_bombs > 0 && !g_letters.empty())
+    {
+        g_bombs--;
+        
+        // 消除所有字母并产生特效
+        for (const auto& l : g_letters)
+        {
+            SpawnParticles(l.x + 4, l.y + 12, RGB(255, 0, 0)); // 红色爆炸
+            iScoring++; // 炸弹消除也给分
+        }
+        g_letters.clear();
+        
+        // 全屏闪烁效果 (通过InvalidateRect触发重绘实现简易版)
+        HDC hdc = GetDC(hWnd);
+        HBRUSH hBrush = CreateSolidBrush(RGB(255, 200, 200));
+        RECT rect = { left, top, right, bottom };
+        FillRect(hdc, &rect, hBrush);
+        DeleteObject(hBrush);
+        ReleaseDC(hWnd, hdc);
+        
+        Beep(500, 300); // 长音效
+        InvalidateRect(hWnd, NULL, TRUE);
+    }
+    else
+    {
+        Beep(200, 100); // 无法使用音效
+    }
+}
+
 void LoadHighScore()
 {
-    FILE* fp = NULL;
-    if (fopen_s(&fp, "highscore.dat", "rb") == 0 && fp != NULL)
+    FILE* fp;
+    if (fopen_s(&fp, "highscore.dat", "rb") == 0)
     {
         fread(&iHighScore, sizeof(int), 1, fp);
         fclose(fp);
     }
-    else
-    {
-        iHighScore = 0;
-    }
 }
 
-// 保存最高分
 void SaveHighScore()
 {
-    FILE* fp = NULL;
-    if (fopen_s(&fp, "highscore.dat", "wb") == 0 && fp != NULL)
+    FILE* fp;
+    if (fopen_s(&fp, "highscore.dat", "wb") == 0)
     {
         fwrite(&iHighScore, sizeof(int), 1, fp);
         fclose(fp);
